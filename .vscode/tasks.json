@@ -1,0 +1,57 @@
+{
+    "tasks": [
+        {
+            "type": "cppbuild",
+            "label": "C/C++: Build scheduler",
+            "command": "C:\\Mingw64\\mingw64\\bin\\g++.exe",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-std=c++17",
+                "-Wall",
+                "-Wextra",
+                "-g",
+                "-I",
+                "${workspaceFolder}/include",
+                "src/main.cpp",
+                "src/course_io.cpp",
+                "src/course_edit.cpp",
+                "src/scheduler.cpp",
+                "-o",
+                "output/scheduler.exe"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "调试器生成的任务。"
+        },
+        {
+            "type": "shell",
+            "label": "C/C++: Run scheduler",
+            "command": ".\\output\\scheduler.exe",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "type": "shell",
+            "label": "C/C++: Build and Run scheduler",
+            "dependsOn": [
+                "C/C++: Build scheduler"
+            ],
+            "command": ".\\output\\scheduler.exe",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        }
+    ],
+    "version": "2.0.0"
+}
