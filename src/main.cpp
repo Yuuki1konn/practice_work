@@ -7,11 +7,13 @@
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <unordered_set>
 
 #include "../include/models.h" //引入自定义的数据模型头文件，包含 Course, PlanConfig, SemesterPlan 
 #include "../include/course_io.h" //引入课程 IO 相关函数头文件，包含导入、导出课程目录的函数
 #include "../include/course_edit.h" //引入课程编辑相关函数头文件，包含添加、删除、修改课程的函数
 #include "../include/scheduler.h" //引入排课相关函数头文件，包含生成排课计划的函数
+#include "../include/db_odbc.h" //引入数据库 ODBC 相关函数头文件，包含数据库连接、查询、更新等操作
 
 std::vector<Course> courses; // 全局变量，存储导入的课程目录
 std::unordered_map<std::string, Course> course_map; // 全局变量，存储课程 ID 到课程对象的映射
@@ -316,7 +318,43 @@ void printPlanPreview(const std::vector<SemesterPlan>& current_plan,
         std::cout << "\n";
     }
 }
+//构建 ODBC 连接字符串，用于连接 MySQL 数据库。
+std::string buildOdbcConnStr(const std::string& uid, const std::string& pwd){
+    return "DRIVER={MySQL ODBC 9.6 Unicode Driver};"
+           "SERVER=127.0.0.1;"
+           "PORT=3306;"
+           "DATABASE=university_scheduler;"
+           "UID=" + uid + ";"
+           "PWD=" + pwd + ";"
+           "OPTION=3;";
+}
 
+// 根据学生已完成的课程集合，从所有课程中筛选出尚未完成的课程（待修课程），
+// 并移除这些待修课程中已经完成的先修课程依赖。
+std::vector<Course> buildPendingCoursesByCompleted(
+    const std::vector<Course>& all_courses,
+    const std::unordered_set<std::string>& completed_ids
+){
+    std::vector<Course> pending;
+    for(const auto& c : all_courses){
+        if(completed_ids.count(c.id) > 0){
+            continue; //这门课已修完，直接剔除
+        }
+
+        // 复制课程，因为需要修改其先修列表
+        Course copy = c;
+        std::vector<std::string> kept_prereq;
+        for(const auto& pre : c.prereq_ids){
+            if(completed_ids.count(pre) == 0){
+                // 如果先修课程尚未完成，则保留依赖
+                kept_prereq.push_back(pre);
+            }
+        }
+        copy.prereq_ids = kept_prereq;// 更新先修列表（已完成的先修被移除）
+        pending.push_back(copy);
+    }
+    return pending;
+}
 
 /**
  * 程序入口
@@ -497,11 +535,66 @@ int main(){
                 listCourses(courses);
                 std::cout << "\n";
 
+                std::vector<Course> scheduling_courses = courses;
+
+                std::string use_db;
+                std::cout << "是否读取数据库已修课程并剔除? (y/N): ";
+                std::getline(std::cin , use_db);
+                use_db = trim(use_db);
+
+                if(use_db == "y" || use_db == "Y"){
+                    std::string uid, pwd, sid;
+                    std::cout << "MySQL user: ";
+                    std::getline(std::cin, uid);
+                    std::cout << "MySQL password: ";
+                    std::getline(std::cin , pwd);
+                    std::cout << "Student ID: ";
+                    std::getline(std::cin, sid);
+                    sid = trim(sid);
+
+                    if(sid.empty()){
+                        std::cout<<"学号不能为空。\n";
+                        waitForEnter();
+                        break;
+                    }
+
+                    OdbcDb db;
+                    std::string db_err;
+                    if(!db.connect(buildOdbcConnStr(uid, pwd), db_err)){
+                        std::cout<<"数据库连接失败: "<<db_err<<"\n";
+                        waitForEnter();
+                        break;
+                    }
+
+                    std::vector<LearnedCourse> history;
+                    if(!db.listStudentCourses(sid, history , db_err)){
+                        std::cout<<"读取学生历史失败: " <<db_err<<"\n";
+                        waitForEnter();
+                        break;
+                    }
+
+                    std::unordered_set<std::string> completed_ids;
+                    for(const auto& r : history){
+                        if(r.status == "COMPLETED"){
+                            completed_ids.insert(r.course_id);
+                        }
+                    }
+
+                    scheduling_courses = buildPendingCoursesByCompleted(courses, completed_ids);
+                    std::cout << "已修完成 " << completed_ids.size() << " 门课程，当前待排课程 " << scheduling_courses.size() << " 门。\n";
+                }
+
+                if(scheduling_courses.empty()){
+                    std::cout << "当前学生无待排课程。\n";
+                    plan.clear();
+                    waitForEnter();
+                    break;
+                }
                 PlanConfig config;
                 std::string err;
                 inputPlanConfig(config);
                 // 调用核心排课函数 generateSemesterPlan，生成学期计划
-                if(!generateSemesterPlan(courses, config, plan, err)){
+                if(!generateSemesterPlan(scheduling_courses, config, plan, err)){
                     std::cout<<"生成排课计划失败: "<<err<<"\n";
                     waitForEnter();
                     break;

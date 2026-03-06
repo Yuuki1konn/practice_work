@@ -16,6 +16,10 @@
                 "src/course_io.cpp",
                 "src/course_edit.cpp",
                 "src/scheduler.cpp",
+                "src/db_odbc.cpp",
+                // "src/p2_3_odbc_test.cpp",
+                // "src/p2_5_insert_plan_test.cpp",
+                "-lodbc32",
                 "-o",
                 "output/scheduler.exe"
             ],

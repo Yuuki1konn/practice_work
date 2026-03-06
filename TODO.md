@@ -79,28 +79,28 @@
 说明：`Navicat Premium 16` 是数据库管理客户端，建议后端数据库使用 `MySQL 8.x`（或老师指定数据库）。
 
 ## 2.1 数据库表设计
-- [ ] `P2-1` 建 3 张表：
+- [x] `P2-1` 建 3 张表：
   - `student(student_id PK, name, major, grade)`
   - `course(course_id PK, course_name, credit)`
   - `student_course(id PK, student_id FK, course_id FK, semester, score, status)`
-- [ ] `P2-2` 在 Navicat 中创建并导出 SQL 脚本到 `docs/schema.sql`。
+- [x] `P2-2` 在 Navicat 中创建并导出 SQL 脚本到 `docs/schema.sql`。
 
 完成标准：
 - 三表可创建、外键关系正确、可插入示例数据。
 
 ## 2.2 C++ 连接数据库
-- [ ] `P2-3` 选连接方案（推荐其一）：
+- [x] `P2-3` 选连接方案（推荐其一）：
   - MySQL Connector/C++
-  - ODBC
-- [ ] `P2-4` 实现最小连接与查询：列出某学生已修课程。
-- [ ] `P2-5` 把第一阶段导出的课表写入 `student_course`（至少包含学号、课程号、学期、状态）。
+  - ODBC <-我们选的这个
+- [x] `P2-4` 实现最小连接与查询：列出某学生已修课程。
+- [x] `P2-5` 把第一阶段导出的课表写入 `student_course`（至少包含学号、课程号、学期、状态）。
 
 完成标准：
 - 命令行能完成“读学生历史 -> 写新排课结果”闭环。
 
 ## 2.3 业务联动
-- [ ] `P2-6` 排课前读取学生已修课程，自动从待排课程中剔除。
-- [ ] `P2-7` 防止重复插入（同学生同课程同学期）。
+- [x] `P2-6` 排课前读取学生已修课程，自动从待排课程中剔除。
+- [x] `P2-7` 防止重复插入（同学生同课程同学期）。
 
 完成标准：
 - 同一学生重复执行排课不会出现脏数据。

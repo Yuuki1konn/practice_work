@@ -178,13 +178,23 @@ bool topologicalSort(
     }
     return true;
 }
-
+/**
+ * 生成按学期的排课计划（核心排课算法）。
+ * 该函数基于课程的先修依赖关系、学分以及用户配置（最大学期数、每学期学分上限、排课策略），
+ * 使用贪心拓扑排序的方式，逐学期选择可学课程，生成一个满足所有约束的学期计划列表。
+ * @param courses  所有课程的列表（已通过合法性检查，如先修课程存在、学分有效等）。
+ * @param config   排课配置（最大学期数、每学期最大学分、策略）。
+ * @param plan     [输出参数] 生成的学期计划列表，每个 SemesterPlan 包含该学期课程 ID 列表和总学分。
+ * @param err      [输出参数] 如果排课失败，返回详细的错误信息。
+ * @return         成功生成计划返回 true，失败返回 false。
+ */
 bool generateSemesterPlan(
     const std::vector<Course>& courses,
     const PlanConfig& config,
     std::vector<SemesterPlan>& plan,
     std::string& err
 ) {
+    // 1. 清空输出计划，并从基础合法性检查开始
     plan.clear();
     if (courses.empty()) {
         err = "课程目录为空";
@@ -195,6 +205,7 @@ bool generateSemesterPlan(
         return false;
     }
 
+    // 2. 检查每门课程学分是否超过单学期上限，并计算总学分
     int total_credits = 0;
     for (const auto& c : courses) {
         if (c.credit > config.max_credits_per_semester) {
@@ -203,39 +214,44 @@ bool generateSemesterPlan(
         }
         total_credits += c.credit;
     }
+    // 总学分容量检查：总学分不能超过最大学期数 × 每学期学分上限
     if (total_credits > config.max_semesters * config.max_credits_per_semester) {
         err = "总学分超过给定学期上限与单学期学分上限的容量";
         return false;
     }
 
+    // 3. 构建先修依赖图（邻接表 adj 和入度 indegree），并建立课程 ID 到 Course 对象的映射
     std::unordered_map<std::string, std::vector<std::string>> adj;
     std::unordered_map<std::string, int> indegree;
     if (!buildPrereqGraph(courses, adj, indegree, err)) {
-        return false;
+        return false;// 图构建失败（如先修课程未定义），错误信息已由 buildPrereqGraph 设置
     }
-    const auto course_map = buildCourseMap(courses);
+    const auto course_map = buildCourseMap(courses);// 快速获取课程信息
 
-    std::unordered_set<std::string> scheduled;
-    std::vector<std::string> available;
+    // 4. 初始化数据结构
+    std::unordered_set<std::string> scheduled;// 已安排的课程 ID 集合
+    std::vector<std::string> available;// 当前可选的课程（入度为 0 且尚未安排
     for (const auto& c : courses) {
         if (indegree[c.id] == 0) {
             available.push_back(c.id);
         }
     }
 
-    int semester_used = 0;
-    int remaining_credits = total_credits;
-
+    int semester_used = 0;// 已使用的学期数
+    int remaining_credits = total_credits;// 剩余总学分
+    // 5. 主循环：当还有课程未安排时继续
     while (scheduled.size() < courses.size()) {
+        // 5.1 学期数超限检查
         if (semester_used >= config.max_semesters) {
             err = "超过最大学期数，仍有课程无法安排";
             return false;
         }
+        // 5.2 如果当前没有可用课程，说明存在环或依赖无法满足
         if (available.empty()) {
             err = "存在先修环或不可达依赖，无法继续排课";
             return false;
         }
-
+        // 5.3 根据策略、剩余学分和剩余学期数，从 available 中挑选本学期的课程
         int remaining_semesters = config.max_semesters - semester_used;
         std::vector<std::string> picked = pickCoursesForSemester(
             available, course_map, config, remaining_credits, remaining_semesters
@@ -244,8 +260,9 @@ bool generateSemesterPlan(
             err = "当前学期无法选择任何课程，请检查学分上限设置";
             return false;
         }
-
+        // 5.4 将选中的课程构建为集合，便于快速查找
         std::unordered_set<std::string> picked_set(picked.begin(), picked.end());
+        // 5.5 创建本学期计划对象，记录课程和总学分
         SemesterPlan sem;
         for (const auto& id : picked) {
             sem.course_ids.push_back(id);
@@ -254,23 +271,25 @@ bool generateSemesterPlan(
             remaining_credits -= course_map.at(id).credit;
         }
         plan.push_back(sem);
-
+        // 5.6 准备下一轮的候选课程列表
+        // 首先将当前 available 中未被选中的课程保留
         std::vector<std::string> next_available;
         for (const auto& id : available) {
             if (picked_set.count(id) == 0) {
                 next_available.push_back(id);
             }
         }
-
+        // 遍历本学期选中的课程，处理它们的后继课程
         for (const auto& id : picked) {
             for (const auto& v : adj[id]) {
-                indegree[v]--;
+                indegree[v]--;// 减少后继课程的入度
+                // 如果入度变为 0 且该后继课程尚未被安排，则加入下一轮候选
                 if (indegree[v] == 0 && scheduled.count(v) == 0) {
                     next_available.push_back(v);
                 }
             }
         }
-
+        // 5.7 对 next_available 进行去重（防止同一课程被多次添加）
         std::unordered_set<std::string> dedup;
         std::vector<std::string> compact;
         for (const auto& id : next_available) {
@@ -278,10 +297,10 @@ bool generateSemesterPlan(
                 compact.push_back(id);
             }
         }
-        available.swap(compact);
-
+        available.swap(compact);// 用去重后的紧凑列表替换 available
+        // 5.8 学期计数增加
         semester_used++;
     }
-
+    // 6. 所有课程安排完毕，返回成功
     return true;
 }
