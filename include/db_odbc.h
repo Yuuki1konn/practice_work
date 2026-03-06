@@ -21,6 +21,13 @@ struct LearnedCourse {
     double score = 0.0;
 };
 
+struct StudentInfo {
+    std::string student_id;
+    std::string name;
+    std::string major;
+    int grade = 0;
+};
+
 struct StudentCoursePlanRow {
     std::string course_id;
     int semester = 0;
@@ -48,6 +55,11 @@ public:
     bool ping(std::string& err);
     bool getStudentCount(int& count, std::string& err);
     bool listStudentCourses(const std::string& student_id, std::vector<LearnedCourse>& out, std::string& err);
+    bool listStudents(std::vector<StudentInfo>& out, std::string& err);
+    bool getStudentById(const std::string& student_id, StudentInfo& out, bool& found, std::string& err);
+    bool addStudent(const StudentInfo& s, std::string& err);
+    bool updateStudent(const StudentInfo& s, std::string& err);
+    bool deleteStudent(const std::string& student_id, std::string& err);
 
     // Legacy wrapper kept for older test files.
     bool insertStudentPlanRows(const std::string& student_id,

@@ -140,6 +140,315 @@ bool OdbcDb::getStudentCount(int& count, std::string& err) {
     return true;
 }
 
+bool OdbcDb::listStudents(std::vector<StudentInfo>& out, std::string& err) {
+    out.clear();
+    if (dbc_ == SQL_NULL_HDBC) {
+        err = "Not connected.";
+        return false;
+    }
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &stmt))) {
+        err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        return false;
+    }
+
+    const char* sql = "SELECT student_id, name, major, grade FROM student ORDER BY student_id";
+    if (!SQL_SUCCEEDED(SQLExecDirectA(stmt, (SQLCHAR*)sql, SQL_NTS))) {
+        err = "listStudents query failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    while (true) {
+        SQLRETURN ret = SQLFetch(stmt);
+        if (ret == SQL_NO_DATA) {
+            break;
+        }
+        if (!SQL_SUCCEEDED(ret)) {
+            err = "SQLFetch failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            return false;
+        }
+
+        char sid[64] = {0};
+        char name[128] = {0};
+        char major[128] = {0};
+        SQLINTEGER grade = 0;
+        SQLLEN ind1 = 0, ind2 = 0, ind3 = 0, ind4 = 0;
+        if (!SQL_SUCCEEDED(SQLGetData(stmt, 1, SQL_C_CHAR, sid, sizeof(sid), &ind1)) ||
+            !SQL_SUCCEEDED(SQLGetData(stmt, 2, SQL_C_CHAR, name, sizeof(name), &ind2)) ||
+            !SQL_SUCCEEDED(SQLGetData(stmt, 3, SQL_C_CHAR, major, sizeof(major), &ind3)) ||
+            !SQL_SUCCEEDED(SQLGetData(stmt, 4, SQL_C_SLONG, &grade, sizeof(grade), &ind4))) {
+            err = "SQLGetData failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            return false;
+        }
+        if (ind1 == SQL_NULL_DATA) {
+            continue;
+        }
+
+        StudentInfo s;
+        s.student_id = sid;
+        s.name = (ind2 == SQL_NULL_DATA) ? "" : name;
+        s.major = (ind3 == SQL_NULL_DATA) ? "" : major;
+        s.grade = (ind4 == SQL_NULL_DATA) ? 0 : (int)grade;
+        out.push_back(s);
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return true;
+}
+
+bool OdbcDb::getStudentById(const std::string& student_id, StudentInfo& out, bool& found, std::string& err) {
+    found = false;
+    out = StudentInfo{};
+    if (dbc_ == SQL_NULL_HDBC) {
+        err = "Not connected.";
+        return false;
+    }
+    if (student_id.empty()) {
+        err = "student_id is empty.";
+        return false;
+    }
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &stmt))) {
+        err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        return false;
+    }
+
+    const char* sql = "SELECT student_id, name, major, grade FROM student WHERE student_id = ?";
+    if (!SQL_SUCCEEDED(SQLPrepareA(stmt, (SQLCHAR*)sql, SQL_NTS))) {
+        err = "SQLPrepare failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLLEN sid_ind = SQL_NTS;
+    if (!SQL_SUCCEEDED(SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        (SQLULEN)student_id.size(), 0,
+                                        (SQLPOINTER)student_id.c_str(), 0, &sid_ind))) {
+        err = "SQLBindParameter failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    if (!SQL_SUCCEEDED(SQLExecute(stmt))) {
+        err = "SQLExecute failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLRETURN ret = SQLFetch(stmt);
+    if (ret == SQL_NO_DATA) {
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return true;
+    }
+    if (!SQL_SUCCEEDED(ret)) {
+        err = "SQLFetch failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    char sid[64] = {0};
+    char name[128] = {0};
+    char major[128] = {0};
+    SQLINTEGER grade = 0;
+    SQLLEN ind1 = 0, ind2 = 0, ind3 = 0, ind4 = 0;
+    if (!SQL_SUCCEEDED(SQLGetData(stmt, 1, SQL_C_CHAR, sid, sizeof(sid), &ind1)) ||
+        !SQL_SUCCEEDED(SQLGetData(stmt, 2, SQL_C_CHAR, name, sizeof(name), &ind2)) ||
+        !SQL_SUCCEEDED(SQLGetData(stmt, 3, SQL_C_CHAR, major, sizeof(major), &ind3)) ||
+        !SQL_SUCCEEDED(SQLGetData(stmt, 4, SQL_C_SLONG, &grade, sizeof(grade), &ind4))) {
+        err = "SQLGetData failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    out.student_id = (ind1 == SQL_NULL_DATA) ? "" : sid;
+    out.name = (ind2 == SQL_NULL_DATA) ? "" : name;
+    out.major = (ind3 == SQL_NULL_DATA) ? "" : major;
+    out.grade = (ind4 == SQL_NULL_DATA) ? 0 : (int)grade;
+    found = true;
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return true;
+}
+
+bool OdbcDb::addStudent(const StudentInfo& s, std::string& err) {
+    if (dbc_ == SQL_NULL_HDBC) {
+        err = "Not connected.";
+        return false;
+    }
+    if (s.student_id.empty() || s.name.empty() || s.major.empty() || s.grade <= 0) {
+        err = "invalid student fields.";
+        return false;
+    }
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &stmt))) {
+        err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        return false;
+    }
+
+    const char* sql = "INSERT INTO student(student_id, name, major, grade) VALUES(?, ?, ?, ?)";
+    if (!SQL_SUCCEEDED(SQLPrepareA(stmt, (SQLCHAR*)sql, SQL_NTS))) {
+        err = "SQLPrepare failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    char sid[64] = {0};
+    char name[128] = {0};
+    char major[128] = {0};
+    SQLINTEGER grade = s.grade;
+    SQLLEN sid_ind = SQL_NTS;
+    SQLLEN name_ind = SQL_NTS;
+    SQLLEN major_ind = SQL_NTS;
+    SQLLEN grade_ind = 0;
+
+    std::strncpy(sid, s.student_id.c_str(), sizeof(sid) - 1);
+    std::strncpy(name, s.name.c_str(), sizeof(name) - 1);
+    std::strncpy(major, s.major.c_str(), sizeof(major) - 1);
+
+    if (!SQL_SUCCEEDED(SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        sizeof(sid) - 1, 0, sid, sizeof(sid), &sid_ind)) ||
+        !SQL_SUCCEEDED(SQLBindParameter(stmt, 2, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        sizeof(name) - 1, 0, name, sizeof(name), &name_ind)) ||
+        !SQL_SUCCEEDED(SQLBindParameter(stmt, 3, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        sizeof(major) - 1, 0, major, sizeof(major), &major_ind)) ||
+        !SQL_SUCCEEDED(SQLBindParameter(stmt, 4, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_INTEGER,
+                                        0, 0, &grade, sizeof(grade), &grade_ind))) {
+        err = "SQLBindParameter failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    if (!SQL_SUCCEEDED(SQLExecute(stmt))) {
+        err = "addStudent failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return true;
+}
+
+bool OdbcDb::updateStudent(const StudentInfo& s, std::string& err) {
+    if (dbc_ == SQL_NULL_HDBC) {
+        err = "Not connected.";
+        return false;
+    }
+    if (s.student_id.empty() || s.name.empty() || s.major.empty() || s.grade <= 0) {
+        err = "invalid student fields.";
+        return false;
+    }
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &stmt))) {
+        err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        return false;
+    }
+
+    const char* sql = "UPDATE student SET name = ?, major = ?, grade = ? WHERE student_id = ?";
+    if (!SQL_SUCCEEDED(SQLPrepareA(stmt, (SQLCHAR*)sql, SQL_NTS))) {
+        err = "SQLPrepare failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    char sid[64] = {0};
+    char name[128] = {0};
+    char major[128] = {0};
+    SQLINTEGER grade = s.grade;
+    SQLLEN sid_ind = SQL_NTS;
+    SQLLEN name_ind = SQL_NTS;
+    SQLLEN major_ind = SQL_NTS;
+    SQLLEN grade_ind = 0;
+
+    std::strncpy(sid, s.student_id.c_str(), sizeof(sid) - 1);
+    std::strncpy(name, s.name.c_str(), sizeof(name) - 1);
+    std::strncpy(major, s.major.c_str(), sizeof(major) - 1);
+
+    if (!SQL_SUCCEEDED(SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        sizeof(name) - 1, 0, name, sizeof(name), &name_ind)) ||
+        !SQL_SUCCEEDED(SQLBindParameter(stmt, 2, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        sizeof(major) - 1, 0, major, sizeof(major), &major_ind)) ||
+        !SQL_SUCCEEDED(SQLBindParameter(stmt, 3, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_INTEGER,
+                                        0, 0, &grade, sizeof(grade), &grade_ind)) ||
+        !SQL_SUCCEEDED(SQLBindParameter(stmt, 4, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        sizeof(sid) - 1, 0, sid, sizeof(sid), &sid_ind))) {
+        err = "SQLBindParameter failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    if (!SQL_SUCCEEDED(SQLExecute(stmt))) {
+        err = "updateStudent failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLLEN rc = 0;
+    if (SQL_SUCCEEDED(SQLRowCount(stmt, &rc)) && rc == 0) {
+        err = "student not found: " + s.student_id;
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return true;
+}
+
+bool OdbcDb::deleteStudent(const std::string& student_id, std::string& err) {
+    if (dbc_ == SQL_NULL_HDBC) {
+        err = "Not connected.";
+        return false;
+    }
+    if (student_id.empty()) {
+        err = "student_id is empty.";
+        return false;
+    }
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &stmt))) {
+        err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        return false;
+    }
+
+    const char* sql = "DELETE FROM student WHERE student_id = ?";
+    if (!SQL_SUCCEEDED(SQLPrepareA(stmt, (SQLCHAR*)sql, SQL_NTS))) {
+        err = "SQLPrepare failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLLEN sid_ind = SQL_NTS;
+    if (!SQL_SUCCEEDED(SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        (SQLULEN)student_id.size(), 0,
+                                        (SQLPOINTER)student_id.c_str(), 0, &sid_ind))) {
+        err = "SQLBindParameter failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    if (!SQL_SUCCEEDED(SQLExecute(stmt))) {
+        err = "deleteStudent failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLLEN rc = 0;
+    if (SQL_SUCCEEDED(SQLRowCount(stmt, &rc)) && rc == 0) {
+        err = "student not found: " + student_id;
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return true;
+}
+
 bool OdbcDb::listStudentCourses(const std::string& student_id, std::vector<LearnedCourse>& out, std::string& err) {
     out.clear();
     if (dbc_ == SQL_NULL_HDBC) {

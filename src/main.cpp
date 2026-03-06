@@ -29,6 +29,7 @@ void printMenu(){
     std::cout << "2. 编辑课程目录\n";
     std::cout << "3. 生成排课计划\n";
     std::cout << "4. 导出排课计划\n";
+    std::cout << "5. 管理学生\n";
     std::cout << "0. 退出程序\n";
     std::cout << "输入序号: ";
 }
@@ -318,6 +319,52 @@ void printPlanPreview(const std::vector<SemesterPlan>& current_plan,
         std::cout << "\n";
     }
 }
+
+void printStudentList(const std::vector<StudentInfo>& students) {
+    if (students.empty()) {
+        std::cout << "student 表为空。\n";
+        return;
+    }
+    std::cout << "ID | 姓名 | 主修 | 年级\n";
+    for (const auto& s : students) {
+        std::cout << s.student_id << " | " << s.name << " | " << s.major << " | " << s.grade << "\n";
+    }
+}
+
+void printStudentCourseHistory(const std::vector<LearnedCourse>& history) {
+    if (history.empty()) {
+        std::cout << "该学生暂无课程记录。\n";
+        return;
+    }
+    std::cout << "semester | course_id | course_name | status | score\n";
+    for (const auto& r : history) {
+        std::cout << r.semester << " | " << r.course_id << " | " << r.course_name
+                  << " | " << r.status << " | ";
+        if (r.has_score) {
+            std::cout << r.score;
+        } else {
+            std::cout << "NULL";
+        }
+        std::cout << "\n";
+    }
+}
+
+bool parsePositiveIntStrict(const std::string& s, int& out) {
+    std::string t = trim(s);
+    if (t.empty()) {
+        return false;
+    }
+    try {
+        int v = std::stoi(t);
+        if (v <= 0) {
+            return false;
+        }
+        out = v;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 //构建 ODBC 连接字符串，用于连接 MySQL 数据库。
 std::string buildOdbcConnStr(const std::string& uid, const std::string& pwd){
     return "DRIVER={MySQL ODBC 9.6 Unicode Driver};"
@@ -417,11 +464,28 @@ bool buildSchedulingCoursesInteractive(const std::vector<Course>& all_courses,
         return false;
     }
 
+    StudentInfo stu;
+    bool found = false;
+    if (!db.getStudentById(sid, stu, found, err)) {
+        std::cout << "读取学生信息失败: " << err << "\n";
+        return false;
+    }
+    if (!found) {
+        std::cout << "未找到学生: " << sid << "\n";
+        return false;
+    }
+
+    std::cout << "学生信息: " << stu.student_id << " | " << stu.name
+              << " | " << stu.major << " | " << stu.grade << "\n";
+
     std::vector<LearnedCourse> history;
     if (!db.listStudentCourses(sid, history, err)) {
         std::cout << "读取学生历史失败: " << err << "\n";
         return false;
     }
+
+    std::cout << "学生历史课程情况：\n";
+    printStudentCourseHistory(history);
 
     std::unordered_set<std::string> completed_ids;
     for (const auto& r : history) {
@@ -830,6 +894,217 @@ int main(){
                 }
 
                 waitForEnter();
+                break;
+            }
+            case 5: // 选项 5：管理学生
+            {
+                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+                OdbcDb db;
+                std::string err;
+                if (!connectDbByPrompt(db, err)) {
+                    std::cout << "数据库连接失败: " << err << "\n";
+                    waitForEnter();
+                    break;
+                }
+
+                while (1) {
+                    clearScreen();
+                    int sub = -1;
+                    std::cout << "\n--- 学生管理 ---\n";
+                    std::cout << "1. 查看学生列表\n";
+                    std::cout << "2. 新增学生\n";
+                    std::cout << "3. 修改学生\n";
+                    std::cout << "4. 删除学生\n";
+                    std::cout << "5. 查看某学生课程情况\n";
+                    std::cout << "0. 返回主菜单\n";
+                    std::cout << "请输入序号: ";
+
+                    if (!(std::cin >> sub)) {
+                        std::cout << "输入错误，请输入序号。\n";
+                        std::cin.clear();
+                        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+                        continue;
+                    }
+                    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+                    if (sub == 0) {
+                        break;
+                    }
+
+                    if (sub == 1) {
+                        std::vector<StudentInfo> students;
+                        if (!db.listStudents(students, err)) {
+                            std::cout << "读取学生列表失败: " << err << "\n";
+                        } else {
+                            printStudentList(students);
+                        }
+                        waitForEnter();
+                    } else if (sub == 2) {
+                        std::vector<StudentInfo> students;
+                        if (db.listStudents(students, err)) {
+                            std::cout << "当前学生列表（新增时可参考）：\n";
+                            printStudentList(students);
+                        }
+
+                        StudentInfo s;
+                        std::string line;
+                        std::cout << "学号: ";
+                        std::getline(std::cin, s.student_id);
+                        s.student_id = trim(s.student_id);
+                        std::cout << "姓名: ";
+                        std::getline(std::cin, s.name);
+                        s.name = trim(s.name);
+                        std::cout << "主修: ";
+                        std::getline(std::cin, s.major);
+                        s.major = trim(s.major);
+                        std::cout << "年级(正整数): ";
+                        std::getline(std::cin, line);
+
+                        if (!parsePositiveIntStrict(line, s.grade)) {
+                            std::cout << "年级输入无效。\n";
+                            waitForEnter();
+                            continue;
+                        }
+
+                        if (!db.addStudent(s, err)) {
+                            std::cout << "新增学生失败: " << err << "\n";
+                        } else {
+                            std::cout << "新增学生成功。\n";
+                        }
+                        waitForEnter();
+                    } else if (sub == 3) {
+                        std::vector<StudentInfo> students;
+                        if (!db.listStudents(students, err)) {
+                            std::cout << "读取学生列表失败: " << err << "\n";
+                            waitForEnter();
+                            continue;
+                        }
+                        printStudentList(students);
+
+                        std::string sid;
+                        std::cout << "输入要修改的学号: ";
+                        std::getline(std::cin, sid);
+                        sid = trim(sid);
+
+                        StudentInfo old_s;
+                        bool found = false;
+                        if (!db.getStudentById(sid, old_s, found, err)) {
+                            std::cout << "读取学生信息失败: " << err << "\n";
+                            waitForEnter();
+                            continue;
+                        }
+                        if (!found) {
+                            std::cout << "未找到学生: " << sid << "\n";
+                            waitForEnter();
+                            continue;
+                        }
+
+                        StudentInfo new_s = old_s;
+                        std::string line;
+                        std::cout << "姓名(当前: " << old_s.name << ", 回车保持): ";
+                        std::getline(std::cin, line);
+                        line = trim(line);
+                        if (!line.empty()) {
+                            new_s.name = line;
+                        }
+
+                        std::cout << "主修(当前: " << old_s.major << ", 回车保持): ";
+                        std::getline(std::cin, line);
+                        line = trim(line);
+                        if (!line.empty()) {
+                            new_s.major = line;
+                        }
+
+                        std::cout << "年级(当前: " << old_s.grade << ", 回车保持): ";
+                        std::getline(std::cin, line);
+                        line = trim(line);
+                        if (!line.empty()) {
+                            int g = 0;
+                            if (!parsePositiveIntStrict(line, g)) {
+                                std::cout << "年级输入无效，取消修改。\n";
+                                waitForEnter();
+                                continue;
+                            }
+                            new_s.grade = g;
+                        }
+
+                        if (!db.updateStudent(new_s, err)) {
+                            std::cout << "修改学生失败: " << err << "\n";
+                        } else {
+                            std::cout << "修改学生成功。\n";
+                        }
+                        waitForEnter();
+                    } else if (sub == 4) {
+                        std::vector<StudentInfo> students;
+                        if (!db.listStudents(students, err)) {
+                            std::cout << "读取学生列表失败: " << err << "\n";
+                            waitForEnter();
+                            continue;
+                        }
+                        printStudentList(students);
+
+                        std::string sid;
+                        std::cout << "输入要删除的学号: ";
+                        std::getline(std::cin, sid);
+                        sid = trim(sid);
+                        std::string confirm;
+                        std::cout << "确认删除学生 " << sid << " ? (y/N): ";
+                        std::getline(std::cin, confirm);
+                        confirm = trim(confirm);
+                        if (!(confirm == "y" || confirm == "Y")) {
+                            std::cout << "已取消删除。\n";
+                            waitForEnter();
+                            continue;
+                        }
+
+                        if (!db.deleteStudent(sid, err)) {
+                            std::cout << "删除学生失败: " << err << "\n";
+                        } else {
+                            std::cout << "删除学生成功。\n";
+                        }
+                        waitForEnter();
+                    } else if (sub == 5) {
+                        std::vector<StudentInfo> students;
+                        if (!db.listStudents(students, err)) {
+                            std::cout << "读取学生列表失败: " << err << "\n";
+                            waitForEnter();
+                            continue;
+                        }
+                        printStudentList(students);
+
+                        std::string sid;
+                        std::cout << "输入学号以查看课程情况: ";
+                        std::getline(std::cin, sid);
+                        sid = trim(sid);
+
+                        StudentInfo s;
+                        bool found = false;
+                        if (!db.getStudentById(sid, s, found, err)) {
+                            std::cout << "读取学生信息失败: " << err << "\n";
+                            waitForEnter();
+                            continue;
+                        }
+                        if (!found) {
+                            std::cout << "未找到学生: " << sid << "\n";
+                            waitForEnter();
+                            continue;
+                        }
+
+                        std::cout << "学生信息: " << s.student_id << " | "
+                                  << s.name << " | " << s.major << " | " << s.grade << "\n";
+                        std::vector<LearnedCourse> history;
+                        if (!db.listStudentCourses(sid, history, err)) {
+                            std::cout << "读取学生课程失败: " << err << "\n";
+                        } else {
+                            printStudentCourseHistory(history);
+                        }
+                        waitForEnter();
+                    } else {
+                        std::cout << "无效选项。\n";
+                        waitForEnter();
+                    }
+                }
                 break;
             }
             case 0: // 选项 0：退出程序
