@@ -356,6 +356,156 @@ std::vector<Course> buildPendingCoursesByCompleted(
     return pending;
 }
 
+bool connectDbByPrompt(OdbcDb& db, std::string& err) {
+    std::string uid, pwd;
+    std::cout << "MySQL user: ";
+    std::getline(std::cin, uid);
+    std::cout << "MySQL password: ";
+    std::getline(std::cin, pwd);
+    return db.connect(buildOdbcConnStr(uid, pwd), err);
+}
+
+bool syncCacheCoursesToDbInteractive(const std::vector<Course>& cache_courses) {
+    if (cache_courses.empty()) {
+        return true;
+    }
+
+    std::cout << "将缓存课程同步到数据库 course 表...\n";
+    OdbcDb db;
+    std::string err;
+    if (!connectDbByPrompt(db, err)) {
+        std::cout << "数据库连接失败: " << err << "\n";
+        return false;
+    }
+
+    CourseSyncStats stats;
+    if (!db.upsertCourses(cache_courses, stats, err)) {
+        std::cout << "同步 course 表失败: " << err << "\n";
+        return false;
+    }
+
+    std::cout << "course 同步完成: 新增 " << stats.inserted
+              << "，更新/已存在 " << stats.updated_or_unchanged << "\n";
+    return true;
+}
+
+bool buildSchedulingCoursesInteractive(const std::vector<Course>& all_courses,
+                                       std::vector<Course>& scheduling_courses) {
+    scheduling_courses = all_courses;
+
+    std::string use_db;
+    std::cout << "是否读取数据库已修课程并剔除? (y/N): ";
+    std::getline(std::cin, use_db);
+    use_db = trim(use_db);
+    if (!(use_db == "y" || use_db == "Y")) {
+        return true;
+    }
+
+    OdbcDb db;
+    std::string err;
+    if (!connectDbByPrompt(db, err)) {
+        std::cout << "数据库连接失败: " << err << "\n";
+        return false;
+    }
+
+    std::string sid;
+    std::cout << "Student ID: ";
+    std::getline(std::cin, sid);
+    sid = trim(sid);
+    if (sid.empty()) {
+        std::cout << "学号不能为空。\n";
+        return false;
+    }
+
+    std::vector<LearnedCourse> history;
+    if (!db.listStudentCourses(sid, history, err)) {
+        std::cout << "读取学生历史失败: " << err << "\n";
+        return false;
+    }
+
+    std::unordered_set<std::string> completed_ids;
+    for (const auto& r : history) {
+        if (r.status == "COMPLETED") {
+            completed_ids.insert(r.course_id);
+        }
+    }
+
+    scheduling_courses = buildPendingCoursesByCompleted(all_courses, completed_ids);
+    std::cout << "已修完成 " << completed_ids.size() << " 门，待排 "
+              << scheduling_courses.size() << " 门。\n";
+    return true;
+}
+
+std::vector<StudentCoursePlanRow> buildPlanRowsFromPlan(const std::vector<SemesterPlan>& current_plan) {
+    std::vector<StudentCoursePlanRow> rows;
+    for (size_t i = 0; i < current_plan.size(); ++i) {
+        int sem = static_cast<int>(i) + 1;
+        for (const auto& cid : current_plan[i].course_ids) {
+            StudentCoursePlanRow r;
+            r.course_id = cid;
+            r.semester = sem;
+            r.status = "PLANNED";
+            rows.push_back(r);
+        }
+    }
+    return rows;
+}
+
+bool writePlanToDbInteractive(const std::vector<SemesterPlan>& current_plan) {
+    if (current_plan.empty()) {
+        return true;
+    }
+
+    std::string ans;
+    std::cout << "是否将排课结果写入数据库 student_course 表? (y/N): ";
+    std::getline(std::cin, ans);
+    ans = trim(ans);
+    if (!(ans == "y" || ans == "Y")) {
+        return true;
+    }
+
+    OdbcDb db;
+    std::string err;
+    if (!connectDbByPrompt(db, err)) {
+        std::cout << "数据库连接失败: " << err << "\n";
+        return false;
+    }
+
+    std::string sid;
+    std::cout << "Student ID: ";
+    std::getline(std::cin, sid);
+    sid = trim(sid);
+    if (sid.empty()) {
+        std::cout << "学号不能为空。\n";
+        return false;
+    }
+
+    std::string mode;
+    std::cout << "写入模式: 1=追加去重(推荐) 2=覆盖当前学生计划后写入 : ";
+    std::getline(std::cin, mode);
+    mode = trim(mode);
+
+    if (mode == "2") {
+        int deleted = 0;
+        if (!db.deleteStudentPlannedRows(sid, deleted, err)) {
+            std::cout << "删除旧计划失败: " << err << "\n";
+            return false;
+        }
+        std::cout << "已删除该学生旧 PLANNED/ENROLLED 记录: " << deleted << " 条\n";
+    }
+
+    auto rows = buildPlanRowsFromPlan(current_plan);
+    PlanWriteStats stats;
+    if (!db.insertStudentPlanRowsDedup(sid, rows, stats, err)) {
+        std::cout << "写入 student_course 失败: " << err << "\n";
+        return false;
+    }
+
+    std::cout << "写入完成: 新增 " << stats.inserted
+              << "，重复跳过 " << stats.duplicated << "\n";
+    return true;
+}
+
 /**
  * 程序入口
  */
@@ -380,10 +530,37 @@ int main(){
 
             case 1: // 选项 1：导入课程目录
             {
-                std::string path;
                 std::string err;
-                std::cin.ignore(std::numeric_limits<std::streamsize>::max(),'\n'); // 忽略输入缓冲区中的无效字符 前者代表streamsize中的最大值 后者表示到\n结束
+                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
+                std::string source;
+                std::cout << "导入来源: 1=TXT文件 2=数据库course表 (默认1): ";
+                std::getline(std::cin, source);
+                source = trim(source);
+
+                if (source == "2") {
+                    OdbcDb db;
+                    if (!connectDbByPrompt(db, err)) {
+                        std::cout << "数据库连接失败: " << err << "\n";
+                        waitForEnter();
+                        break;
+                    }
+
+                    if (!db.listCoursesFromDb(courses, err)) {
+                        std::cout << "从数据库导入课程失败: " << err << "\n";
+                        waitForEnter();
+                        break;
+                    }
+
+                    rebuildCourseMap(courses, course_map);
+                    plan.clear();
+                    std::cout << "从数据库导入成功，共 " << courses.size() << " 门课程。\n";
+                    std::cout << "已尝试同步导入先修关系（来自 course_prereq 表）。\n";
+                    waitForEnter();
+                    break;
+                }
+
+                std::string path;
                 const auto txt_files = listTxtFilesInDataDir();
                 if (!txt_files.empty()) {
                     std::cout << "检测到以下可导入课程文件：\n";
@@ -398,7 +575,7 @@ int main(){
                 std::getline(std::cin, path);
                 path = trim(path);
 
-                if (path.empty()) { // 默认路径
+                if (path.empty()) {
                     path = "data/courses.txt";
                 } else if (isPositiveInteger(path) && !txt_files.empty()) {
                     size_t idx = static_cast<size_t>(std::stoul(path));
@@ -410,12 +587,12 @@ int main(){
                 }
                 std::cout << "本次导入文件: " << path << "\n";
 
-                if(importCoursesFromTxt(path,courses,err)){
-                    rebuildCourseMap(courses,course_map); // 重建课程映射
-                    plan.clear(); // 课程目录变更后，旧计划作废
-                    std::cout<<"导入课程目录成功，共导入 "<<courses.size()<<" 门课程\n";
-                }else{
-                    std::cout<<"导入课程目录失败: "<<err<<"\n";
+                if (importCoursesFromTxt(path, courses, err)) {
+                    rebuildCourseMap(courses, course_map);
+                    plan.clear();
+                    std::cout << "导入课程目录成功，共导入 " << courses.size() << " 门课程\n";
+                } else {
+                    std::cout << "导入课程目录失败: " << err << "\n";
                 }
                 waitForEnter();//界面停留，等待用户按键
                 break;
@@ -522,11 +699,15 @@ int main(){
             }
             case 3: // 选项 3：生成排课计划
             {
-                // 清空菜单输入留下的换行，避免影响后续 getline / waitForEnter
                 std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-                // 检查课程列表是否为空，若为空则提示先导入课程目录，然后等待用户按回车继续
-                if(courses.empty()){
-                    std::cout<<"请先导入课程目录\n";
+
+                if (courses.empty()) {
+                    std::cout << "请先导入课程目录\n";
+                    waitForEnter();
+                    break;
+                }
+
+                if (!syncCacheCoursesToDbInteractive(courses)) {
                     waitForEnter();
                     break;
                 }
@@ -535,72 +716,30 @@ int main(){
                 listCourses(courses);
                 std::cout << "\n";
 
-                std::vector<Course> scheduling_courses = courses;
-
-                std::string use_db;
-                std::cout << "是否读取数据库已修课程并剔除? (y/N): ";
-                std::getline(std::cin , use_db);
-                use_db = trim(use_db);
-
-                if(use_db == "y" || use_db == "Y"){
-                    std::string uid, pwd, sid;
-                    std::cout << "MySQL user: ";
-                    std::getline(std::cin, uid);
-                    std::cout << "MySQL password: ";
-                    std::getline(std::cin , pwd);
-                    std::cout << "Student ID: ";
-                    std::getline(std::cin, sid);
-                    sid = trim(sid);
-
-                    if(sid.empty()){
-                        std::cout<<"学号不能为空。\n";
-                        waitForEnter();
-                        break;
-                    }
-
-                    OdbcDb db;
-                    std::string db_err;
-                    if(!db.connect(buildOdbcConnStr(uid, pwd), db_err)){
-                        std::cout<<"数据库连接失败: "<<db_err<<"\n";
-                        waitForEnter();
-                        break;
-                    }
-
-                    std::vector<LearnedCourse> history;
-                    if(!db.listStudentCourses(sid, history , db_err)){
-                        std::cout<<"读取学生历史失败: " <<db_err<<"\n";
-                        waitForEnter();
-                        break;
-                    }
-
-                    std::unordered_set<std::string> completed_ids;
-                    for(const auto& r : history){
-                        if(r.status == "COMPLETED"){
-                            completed_ids.insert(r.course_id);
-                        }
-                    }
-
-                    scheduling_courses = buildPendingCoursesByCompleted(courses, completed_ids);
-                    std::cout << "已修完成 " << completed_ids.size() << " 门课程，当前待排课程 " << scheduling_courses.size() << " 门。\n";
+                std::vector<Course> scheduling_courses;
+                if (!buildSchedulingCoursesInteractive(courses, scheduling_courses)) {
+                    waitForEnter();
+                    break;
                 }
 
-                if(scheduling_courses.empty()){
+                if (scheduling_courses.empty()) {
                     std::cout << "当前学生无待排课程。\n";
                     plan.clear();
                     waitForEnter();
                     break;
                 }
+
                 PlanConfig config;
                 std::string err;
                 inputPlanConfig(config);
-                // 调用核心排课函数 generateSemesterPlan，生成学期计划
-                if(!generateSemesterPlan(scheduling_courses, config, plan, err)){
-                    std::cout<<"生成排课计划失败: "<<err<<"\n";
+
+                if (!generateSemesterPlan(scheduling_courses, config, plan, err)) {
+                    std::cout << "生成排课计划失败: " << err << "\n";
                     waitForEnter();
                     break;
                 }
-                // 重新构建课程映射表 course_map，以便后续根据 ID 快速获取课程信息
-                rebuildCourseMap(courses, course_map);
+
+                rebuildCourseMap(courses, course_map); // 仅用于打印课程名和学分
                 std::cout << "\n排课计划生成成功。\n";
                 printPlanPreview(plan, course_map);
                 waitForEnter();
@@ -612,8 +751,13 @@ int main(){
                 std::string err;
 
                 std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-                if(courses.empty()){
-                    std::cout<<"请先导入课程目录\n";
+                if (courses.empty()) {
+                    std::cout << "请先导入课程目录\n";
+                    waitForEnter();
+                    break;
+                }
+
+                if (!syncCacheCoursesToDbInteractive(courses)) {
                     waitForEnter();
                     break;
                 }
@@ -622,46 +766,69 @@ int main(){
                 listCourses(courses);
                 std::cout << "\n";
 
-                if (plan.empty()) {
-                    std::cout << "当前还没有已生成课表，需要先生成。\n";
+                auto regenerateForExport = [&]() -> bool {
+                    std::vector<Course> scheduling_courses;
+                    if (!buildSchedulingCoursesInteractive(courses, scheduling_courses)) {
+                        return false;
+                    }
+                    if (scheduling_courses.empty()) {
+                        std::cout << "当前学生无待排课程。\n";
+                        plan.clear();
+                        return true;
+                    }
+
                     PlanConfig config;
                     inputPlanConfig(config);
-                    if (!generateSemesterPlan(courses, config, plan, err)) {
+                    if (!generateSemesterPlan(scheduling_courses, config, plan, err)) {
                         std::cout << "生成排课计划失败: " << err << "\n";
+                        return false;
+                    }
+                    rebuildCourseMap(courses, course_map);
+                    return true;
+                };
+
+                if (plan.empty()) {
+                    std::cout << "当前还没有已生成课表，需要先生成。\n";
+                    if (!regenerateForExport()) {
                         waitForEnter();
                         break;
                     }
-                    rebuildCourseMap(courses, course_map);
-                    std::cout << "课表已生成。\n";
                 } else {
                     std::string line;
-                    std::cout << "是否重新选择策略并重生成课表后再导出? (y/N): ";
+                    std::cout << "是否重新生成课表后再导出? (y/N): ";
                     std::getline(std::cin, line);
                     line = trim(line);
                     if (line == "y" || line == "Y") {
-                        PlanConfig config;
-                        inputPlanConfig(config);
-                        if (!generateSemesterPlan(courses, config, plan, err)) {
-                            std::cout << "重生成排课计划失败: " << err << "\n";
+                        if (!regenerateForExport()) {
                             waitForEnter();
                             break;
                         }
-                        rebuildCourseMap(courses, course_map);
-                        std::cout << "课表已按新策略重生成。\n";
                     }
                 }
 
+                if (plan.empty()) {
+                    std::cout << "当前无可导出课表。\n";
+                    waitForEnter();
+                    break;
+                }
+
                 printPlanPreview(plan, course_map);
-                std::cout<<"请输入导出文件路径(回车默认 output/plan.txt):";
-                std::getline(std::cin, path); // 读取用户输入的路径
+                std::cout << "请输入导出文件路径(回车默认 output/plan.txt):";
+                std::getline(std::cin, path);
                 if (path.empty()) {
-                    path = "output/plan.txt"; // 默认路径
+                    path = "output/plan.txt";
                 }
-                if(exportPlanToTxt(path,plan,course_map,err)){
-                    std::cout<<"导出排课计划成功:"<<path<<"\n";
-                }else{
-                    std::cout<<"导出排课计划失败: "<<err<<"\n";
+
+                if (exportPlanToTxt(path, plan, course_map, err)) {
+                    std::cout << "导出排课计划成功:" << path << "\n";
+                    if (!writePlanToDbInteractive(plan)) {
+                        waitForEnter();
+                        break;
+                    }
+                } else {
+                    std::cout << "导出排课计划失败: " << err << "\n";
                 }
+
                 waitForEnter();
                 break;
             }
