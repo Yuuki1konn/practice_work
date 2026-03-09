@@ -682,9 +682,83 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
         return true;
     }
 
+    std::unordered_set<std::string> existing_course_ids;
+    {
+        SQLHSTMT scan_stmt = SQL_NULL_HSTMT;
+        if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &scan_stmt))) {
+            err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+            return false;
+        }
+
+        const char* scan_sql = "SELECT course_id FROM course";
+        if (!SQL_SUCCEEDED(SQLExecDirectA(scan_stmt, (SQLCHAR*)scan_sql, SQL_NTS))) {
+            err = "scan existing courses failed: " + getOdbcError(SQL_HANDLE_STMT, scan_stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, scan_stmt);
+            return false;
+        }
+
+        while (true) {
+            SQLRETURN ret = SQLFetch(scan_stmt);
+            if (ret == SQL_NO_DATA) {
+                break;
+            }
+            if (!SQL_SUCCEEDED(ret)) {
+                err = "scan existing courses fetch failed: " + getOdbcError(SQL_HANDLE_STMT, scan_stmt);
+                SQLFreeHandle(SQL_HANDLE_STMT, scan_stmt);
+                return false;
+            }
+
+            char cid_buf[64] = {0};
+            SQLLEN cid_ind = 0;
+            if (!SQL_SUCCEEDED(SQLGetData(scan_stmt, 1, SQL_C_CHAR, cid_buf, sizeof(cid_buf), &cid_ind))) {
+                err = "scan existing courses read failed: " + getOdbcError(SQL_HANDLE_STMT, scan_stmt);
+                SQLFreeHandle(SQL_HANDLE_STMT, scan_stmt);
+                return false;
+            }
+            if (cid_ind != SQL_NULL_DATA) {
+                existing_course_ids.insert(cid_buf);
+            }
+        }
+
+        SQLFreeHandle(SQL_HANDLE_STMT, scan_stmt);
+    }
+
+    bool autocommit_off = false;
+    auto rollbackAndRestore = [&]() {
+        if (autocommit_off) {
+            SQLEndTran(SQL_HANDLE_DBC, dbc_, SQL_ROLLBACK);
+            SQLSetConnectAttr(dbc_, SQL_ATTR_AUTOCOMMIT, (SQLPOINTER)SQL_AUTOCOMMIT_ON, 0);
+            autocommit_off = false;
+        }
+    };
+    auto commitAndRestore = [&]() -> bool {
+        if (!autocommit_off) {
+            return true;
+        }
+        if (!SQL_SUCCEEDED(SQLEndTran(SQL_HANDLE_DBC, dbc_, SQL_COMMIT))) {
+            err = "commit upsertCourses failed: " + getOdbcError(SQL_HANDLE_DBC, dbc_);
+            rollbackAndRestore();
+            return false;
+        }
+        if (!SQL_SUCCEEDED(SQLSetConnectAttr(dbc_, SQL_ATTR_AUTOCOMMIT, (SQLPOINTER)SQL_AUTOCOMMIT_ON, 0))) {
+            err = "restore autocommit failed: " + getOdbcError(SQL_HANDLE_DBC, dbc_);
+            rollbackAndRestore();
+            return false;
+        }
+        autocommit_off = false;
+        return true;
+    };
+
+    if (!SQL_SUCCEEDED(SQLSetConnectAttr(dbc_, SQL_ATTR_AUTOCOMMIT, (SQLPOINTER)SQL_AUTOCOMMIT_OFF, 0))) {
+        err = "disable autocommit failed: " + getOdbcError(SQL_HANDLE_DBC, dbc_);
+        return false;
+    }
+    autocommit_off = true;
+
     SQLHSTMT stmt = SQL_NULL_HSTMT;
     if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &stmt))) {
         err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        rollbackAndRestore();
         return false;
     }
 
@@ -698,6 +772,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
     if (!SQL_SUCCEEDED(SQLPrepareA(stmt, (SQLCHAR*)sql, SQL_NTS))) {
         err = "SQLPrepare failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        rollbackAndRestore();
         return false;
     }
 
@@ -716,6 +791,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
                                         0, 0, &credit, sizeof(credit), &credit_ind))) {
         err = "SQLBindParameter failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        rollbackAndRestore();
         return false;
     }
 
@@ -723,6 +799,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
         if (c.id.empty() || c.name.empty() || c.credit <= 0) {
             err = "Invalid course row for upsert.";
             SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            rollbackAndRestore();
             return false;
         }
 
@@ -737,16 +814,13 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
             err = "upsertCourses SQLExecute failed at course_id=" + c.id + ": " +
                   getOdbcError(SQL_HANDLE_STMT, stmt);
             SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            rollbackAndRestore();
             return false;
         }
 
-        SQLLEN rc = 0;
-        if (SQL_SUCCEEDED(SQLRowCount(stmt, &rc))) {
-            if (rc == 1) {
-                stats.inserted++;
-            } else {
-                stats.updated_or_unchanged++;
-            }
+        if (existing_course_ids.count(c.id) == 0) {
+            stats.inserted++;
+            existing_course_ids.insert(c.id);
         } else {
             stats.updated_or_unchanged++;
         }
@@ -759,6 +833,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
     SQLHSTMT ensure_stmt = SQL_NULL_HSTMT;
     if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &ensure_stmt))) {
         err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        rollbackAndRestore();
         return false;
     }
     const char* ensure_sql =
@@ -774,6 +849,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
     if (!SQL_SUCCEEDED(SQLExecDirectA(ensure_stmt, (SQLCHAR*)ensure_sql, SQL_NTS))) {
         err = "ensure course_prereq table failed: " + getOdbcError(SQL_HANDLE_STMT, ensure_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, ensure_stmt);
+        rollbackAndRestore();
         return false;
     }
     SQLFreeHandle(SQL_HANDLE_STMT, ensure_stmt);
@@ -786,6 +862,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
         err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
         if (del_stmt != SQL_NULL_HSTMT) SQLFreeHandle(SQL_HANDLE_STMT, del_stmt);
         if (ins_stmt != SQL_NULL_HSTMT) SQLFreeHandle(SQL_HANDLE_STMT, ins_stmt);
+        rollbackAndRestore();
         return false;
     }
 
@@ -796,12 +873,14 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
         err = "prepare prereq delete SQL failed: " + getOdbcError(SQL_HANDLE_STMT, del_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, del_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, ins_stmt);
+        rollbackAndRestore();
         return false;
     }
     if (!SQL_SUCCEEDED(SQLPrepareA(ins_stmt, (SQLCHAR*)ins_sql, SQL_NTS))) {
         err = "prepare prereq insert SQL failed: " + getOdbcError(SQL_HANDLE_STMT, ins_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, del_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, ins_stmt);
+        rollbackAndRestore();
         return false;
     }
 
@@ -812,6 +891,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
         err = "bind prereq delete parameter failed: " + getOdbcError(SQL_HANDLE_STMT, del_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, del_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, ins_stmt);
+        rollbackAndRestore();
         return false;
     }
 
@@ -826,6 +906,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
         err = "bind prereq insert parameter failed: " + getOdbcError(SQL_HANDLE_STMT, ins_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, del_stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, ins_stmt);
+        rollbackAndRestore();
         return false;
     }
 
@@ -836,6 +917,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
             err = "delete old prereq failed for " + c.id + ": " + getOdbcError(SQL_HANDLE_STMT, del_stmt);
             SQLFreeHandle(SQL_HANDLE_STMT, del_stmt);
             SQLFreeHandle(SQL_HANDLE_STMT, ins_stmt);
+            rollbackAndRestore();
             return false;
         }
         SQLCloseCursor(del_stmt);
@@ -854,6 +936,7 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
                       getOdbcError(SQL_HANDLE_STMT, ins_stmt);
                 SQLFreeHandle(SQL_HANDLE_STMT, del_stmt);
                 SQLFreeHandle(SQL_HANDLE_STMT, ins_stmt);
+                rollbackAndRestore();
                 return false;
             }
             SQLCloseCursor(ins_stmt);
@@ -862,7 +945,214 @@ bool OdbcDb::upsertCourses(const std::vector<Course>& rows, CourseSyncStats& sta
 
     SQLFreeHandle(SQL_HANDLE_STMT, del_stmt);
     SQLFreeHandle(SQL_HANDLE_STMT, ins_stmt);
+    return commitAndRestore();
+}
+
+bool OdbcDb::getCourseDeleteCheck(const std::string& course_id, CourseDeleteCheck& check, std::string& err) {
+    check = CourseDeleteCheck{};
+    if (dbc_ == SQL_NULL_HDBC) {
+        err = "Not connected.";
+        return false;
+    }
+    if (course_id.empty()) {
+        err = "course_id is empty.";
+        return false;
+    }
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &stmt))) {
+        err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        return false;
+    }
+
+    const char* sql =
+        "SELECT "
+        "(SELECT COUNT(*) FROM student_course WHERE course_id = ?), "
+        "(SELECT COUNT(*) FROM course_prereq WHERE course_id = ?), "
+        "(SELECT COUNT(*) FROM course_prereq WHERE prereq_id = ?)";
+
+    if (!SQL_SUCCEEDED(SQLPrepareA(stmt, (SQLCHAR*)sql, SQL_NTS))) {
+        err = "SQLPrepare failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLLEN ind1 = SQL_NTS, ind2 = SQL_NTS, ind3 = SQL_NTS;
+    if (!SQL_SUCCEEDED(SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        (SQLULEN)course_id.size(), 0,
+                                        (SQLPOINTER)course_id.c_str(), 0, &ind1)) ||
+        !SQL_SUCCEEDED(SQLBindParameter(stmt, 2, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        (SQLULEN)course_id.size(), 0,
+                                        (SQLPOINTER)course_id.c_str(), 0, &ind2)) ||
+        !SQL_SUCCEEDED(SQLBindParameter(stmt, 3, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        (SQLULEN)course_id.size(), 0,
+                                        (SQLPOINTER)course_id.c_str(), 0, &ind3))) {
+        err = "SQLBindParameter failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    if (!SQL_SUCCEEDED(SQLExecute(stmt))) {
+        err = "SQLExecute failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLRETURN ret = SQLFetch(stmt);
+    if (!SQL_SUCCEEDED(ret)) {
+        err = "SQLFetch failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    SQLINTEGER student_refs = 0;
+    SQLINTEGER owner_refs = 0;
+    SQLINTEGER required_refs = 0;
+    SQLLEN out1 = 0, out2 = 0, out3 = 0;
+    if (!SQL_SUCCEEDED(SQLGetData(stmt, 1, SQL_C_SLONG, &student_refs, sizeof(student_refs), &out1)) ||
+        !SQL_SUCCEEDED(SQLGetData(stmt, 2, SQL_C_SLONG, &owner_refs, sizeof(owner_refs), &out2)) ||
+        !SQL_SUCCEEDED(SQLGetData(stmt, 3, SQL_C_SLONG, &required_refs, sizeof(required_refs), &out3))) {
+        err = "SQLGetData failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return false;
+    }
+
+    check.student_course_refs = (out1 == SQL_NULL_DATA) ? 0 : (int)student_refs;
+    check.prereq_owner_refs = (out2 == SQL_NULL_DATA) ? 0 : (int)owner_refs;
+    check.prereq_required_refs = (out3 == SQL_NULL_DATA) ? 0 : (int)required_refs;
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     return true;
+}
+
+bool OdbcDb::deleteCourseFromDb(const std::string& course_id,
+                                bool remove_prereq_refs,
+                                CourseDeleteCheck* deleted_check,
+                                std::string& err) {
+    if (dbc_ == SQL_NULL_HDBC) {
+        err = "Not connected.";
+        return false;
+    }
+    if (course_id.empty()) {
+        err = "course_id is empty.";
+        return false;
+    }
+
+    CourseDeleteCheck check;
+    if (!getCourseDeleteCheck(course_id, check, err)) {
+        return false;
+    }
+    if (deleted_check) {
+        *deleted_check = check;
+    }
+    if (check.student_course_refs > 0) {
+        err = "该课程已在 student_course 中被引用，不能删除。";
+        return false;
+    }
+    if (check.prereq_required_refs > 0 && !remove_prereq_refs) {
+        err = "该课程正被其他课程作为先修课引用。";
+        return false;
+    }
+
+    bool autocommit_off = false;
+    auto rollbackAndRestore = [&]() {
+        if (autocommit_off) {
+            SQLEndTran(SQL_HANDLE_DBC, dbc_, SQL_ROLLBACK);
+            SQLSetConnectAttr(dbc_, SQL_ATTR_AUTOCOMMIT, (SQLPOINTER)SQL_AUTOCOMMIT_ON, 0);
+            autocommit_off = false;
+        }
+    };
+    auto commitAndRestore = [&]() -> bool {
+        if (!autocommit_off) {
+            return true;
+        }
+        if (!SQL_SUCCEEDED(SQLEndTran(SQL_HANDLE_DBC, dbc_, SQL_COMMIT))) {
+            err = "commit deleteCourseFromDb failed: " + getOdbcError(SQL_HANDLE_DBC, dbc_);
+            rollbackAndRestore();
+            return false;
+        }
+        if (!SQL_SUCCEEDED(SQLSetConnectAttr(dbc_, SQL_ATTR_AUTOCOMMIT, (SQLPOINTER)SQL_AUTOCOMMIT_ON, 0))) {
+            err = "restore autocommit failed: " + getOdbcError(SQL_HANDLE_DBC, dbc_);
+            rollbackAndRestore();
+            return false;
+        }
+        autocommit_off = false;
+        return true;
+    };
+
+    if (!SQL_SUCCEEDED(SQLSetConnectAttr(dbc_, SQL_ATTR_AUTOCOMMIT, (SQLPOINTER)SQL_AUTOCOMMIT_OFF, 0))) {
+        err = "disable autocommit failed: " + getOdbcError(SQL_HANDLE_DBC, dbc_);
+        return false;
+    }
+    autocommit_off = true;
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc_, &stmt))) {
+        err = "SQLAllocHandle(SQL_HANDLE_STMT) failed.";
+        rollbackAndRestore();
+        return false;
+    }
+
+    if (check.prereq_required_refs > 0) {
+        const char* delete_ref_sql = "DELETE FROM course_prereq WHERE prereq_id = ?";
+        if (!SQL_SUCCEEDED(SQLPrepareA(stmt, (SQLCHAR*)delete_ref_sql, SQL_NTS))) {
+            err = "prepare delete prereq refs failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            rollbackAndRestore();
+            return false;
+        }
+        SQLLEN ind = SQL_NTS;
+        if (!SQL_SUCCEEDED(SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                            (SQLULEN)course_id.size(), 0,
+                                            (SQLPOINTER)course_id.c_str(), 0, &ind))) {
+            err = "bind delete prereq refs failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            rollbackAndRestore();
+            return false;
+        }
+        if (!SQL_SUCCEEDED(SQLExecute(stmt))) {
+            err = "delete prereq refs failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            rollbackAndRestore();
+            return false;
+        }
+        SQLFreeStmt(stmt, SQL_RESET_PARAMS);
+        SQLFreeStmt(stmt, SQL_CLOSE);
+    }
+
+    const char* delete_course_sql = "DELETE FROM course WHERE course_id = ?";
+    if (!SQL_SUCCEEDED(SQLPrepareA(stmt, (SQLCHAR*)delete_course_sql, SQL_NTS))) {
+        err = "prepare delete course failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        rollbackAndRestore();
+        return false;
+    }
+    SQLLEN ind = SQL_NTS;
+    if (!SQL_SUCCEEDED(SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                                        (SQLULEN)course_id.size(), 0,
+                                        (SQLPOINTER)course_id.c_str(), 0, &ind))) {
+        err = "bind delete course failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        rollbackAndRestore();
+        return false;
+    }
+    if (!SQL_SUCCEEDED(SQLExecute(stmt))) {
+        err = "delete course failed: " + getOdbcError(SQL_HANDLE_STMT, stmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        rollbackAndRestore();
+        return false;
+    }
+
+    SQLLEN rc = 0;
+    if (SQL_SUCCEEDED(SQLRowCount(stmt, &rc)) && rc == 0) {
+        err = "course not found: " + course_id;
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        rollbackAndRestore();
+        return false;
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return commitAndRestore();
 }
 
 bool OdbcDb::deleteStudentPlannedRows(const std::string& student_id, int& deleted, std::string& err) {

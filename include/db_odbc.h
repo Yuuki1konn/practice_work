@@ -44,6 +44,12 @@ struct PlanWriteStats {
     int duplicated = 0;
 };
 
+struct CourseDeleteCheck {
+    int student_course_refs = 0;
+    int prereq_owner_refs = 0;
+    int prereq_required_refs = 0;
+};
+
 class OdbcDb {
 public:
     OdbcDb() = default;
@@ -69,6 +75,11 @@ public:
 
     bool listCoursesFromDb(std::vector<Course>& out, std::string& err);
     bool upsertCourses(const std::vector<Course>& rows, CourseSyncStats& stats, std::string& err);
+    bool getCourseDeleteCheck(const std::string& course_id, CourseDeleteCheck& check, std::string& err);
+    bool deleteCourseFromDb(const std::string& course_id,
+                            bool remove_prereq_refs,
+                            CourseDeleteCheck* deleted_check,
+                            std::string& err);
     bool deleteStudentPlannedRows(const std::string& student_id, int& deleted, std::string& err);
     bool insertStudentPlanRowsDedup(const std::string& student_id,
                                     const std::vector<StudentCoursePlanRow>& rows,

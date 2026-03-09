@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"E:/practice_work/build_qt/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

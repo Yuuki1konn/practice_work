@@ -1,0 +1,42 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/scheduler_qt.dir/CourseEditDialog.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/CourseEditDialog.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/CoursePage.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/CoursePage.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/E_/practice_work/src/course_io.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/E_/practice_work/src/course_io.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/E_/practice_work/src/db_odbc.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/E_/practice_work/src/db_odbc.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/E_/practice_work/src/scheduler.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/E_/practice_work/src/scheduler.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/LoginDialog.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/LoginDialog.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/MainWindow.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/MainWindow.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/PlanPage.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/PlanPage.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/StudentCoursePage.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/StudentCoursePage.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/StudentEditDialog.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/StudentEditDialog.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/StudentPage.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/StudentPage.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/main.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/main.cpp.obj.d"
+  "CMakeFiles/scheduler_qt.dir/scheduler_qt_autogen/mocs_compilation.cpp.obj"
+  "CMakeFiles/scheduler_qt.dir/scheduler_qt_autogen/mocs_compilation.cpp.obj.d"
+  "CMakeFiles/scheduler_qt_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/scheduler_qt_autogen.dir/ParseCache.txt"
+  "scheduler_qt_autogen"
+  "libscheduler_qt.dll.a"
+  "scheduler_qt.exe"
+  "scheduler_qt.exe.manifest"
+  "scheduler_qt.pdb"
+  "scheduler_qt_autogen/mocs_compilation.cpp"
+  "scheduler_qt_autogen/timestamp"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/scheduler_qt.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()
